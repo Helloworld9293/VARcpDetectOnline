@@ -1,0 +1,23 @@
+Package: VARcpDetectOnline
+Title: Sequential Change Point Detection for High-Dimensional VAR Models
+Version: 0.1.0
+Authors@R: c(
+    person("Yuhan", "Tian", email = "yuhan.tian@ufl.edu", role = c("aut", "cre")), 
+    person("Abolfazl", "Safikhani", email = "asafikha@gmu.edu", role = "aut"))
+Description: 
+    Implements the algorithm introduced in Tian, Y., and Safikhani, A. (2024) <doi:10.5705/ss.202024.0182>, 
+    "Sequential Change Point Detection in High-dimensional Vector Auto-regressive Models". This package provides tools for detecting change points in the 
+    transition matrices of Vector Auto-Regressive (VAR) models, effectively identifying shifts in temporal 
+    and cross-correlations within high-dimensional time series data. The package includes functions to 
+    generate synthetic VAR data, detect change points in high-dimensional time series, and analyze real-world 
+    data. It also demonstrates an application to financial data: the daily log returns of 186 S&P 500 stocks 
+    from 2004-02-06 to 2016-03-02.
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports: 
+    MASS,
+    sparsevar
+License: MIT + file LICENSE
+
