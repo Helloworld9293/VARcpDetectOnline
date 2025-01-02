@@ -20,4 +20,5 @@ Imports:
     MASS,
     sparsevar
 License: MIT + file LICENSE
-
+URL: https://github.com/Helloworld9293/VARcpDetectOnline
+BugReports: https://github.com/Helloworld9293/VARcpDetectOnline/issues
