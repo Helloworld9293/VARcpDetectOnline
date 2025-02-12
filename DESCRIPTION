@@ -1,6 +1,6 @@
 Package: VARcpDetectOnline
 Title: Sequential Change Point Detection for High-Dimensional VAR Models
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: c(
     person("Yuhan", "Tian", email = "yuhan.tian@ufl.edu", role = c("aut", "cre")),
     person("Abolfazl", "Safikhani", email = "asafikha@gmu.edu", role = "aut"))
