@@ -51,7 +51,6 @@ This function performs sequential change point detection in high-dimensional tim
 This function fits a VAR model to the historical data using the l1 penalty and calculates test statistics for the sliding window to detect change points. If refinement is enabled, a second step narrows down the change point location. Optionally, a correction step can verify the detected change points.
 }
 \examples{
-library(sparsevar)
 library(MASS)
 set.seed(2024)
 As <- list(matrix(c(0.5, 0.2, 0.1, 0.4), 2, 2))

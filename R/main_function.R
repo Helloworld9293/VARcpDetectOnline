@@ -67,10 +67,8 @@ generateVAR <- function(n, As, Sig, h, isOldProvided = FALSE, oldxs = NULL) {
 #' }
 #'
 #' @details This function fits a VAR model to the historical data using the l1 penalty and calculates test statistics for the sliding window to detect change points. If refinement is enabled, a second step narrows down the change point location. Optionally, a correction step can verify the detected change points.
-#' @importFrom sparsevar fitVAR
 #' @importFrom stats qnorm
 #' @examples
-#' library(sparsevar)
 #' library(MASS)
 #' set.seed(2024)
 #' As <- list(matrix(c(0.5, 0.2, 0.1, 0.4), 2, 2))
@@ -295,7 +293,6 @@ get_cps <- function(alarms, w) {
 #'   \item{\code{sp500$date}}{A vector of length 3037, containing the dates for each trading day.}
 #' }
 #' @source Data from the S&P 500 stock index (2004-2016).
-#'
 #' @examples
 #' # Example Usage: Applying Change Point Detection to S&P 500 Data
 #' # This is an example of how to apply the change point detection method
@@ -304,7 +301,7 @@ get_cps <- function(alarms, w) {
 #' # below calculates the average return volatility for all stocks, applies
 #' # the change point detection algorithm, and plots the results with detected
 #' # change points shown as vertical red and black lines.
-#' \dontrun{
+#' \donttest{
 #' # Load the dataset
 #' data(sp500)
 #'
@@ -355,3 +352,468 @@ get_cps <- function(alarms, w) {
 #' }
 #' @seealso \code{\link{VAR_cpDetect_Online}}, \code{\link{get_cps}}
 NULL
+
+
+#' Fit VAR Model with Elastic Net via Cross Validation
+#'
+#' Estimates a (possibly high-dimensional) VAR model using penalized least squares
+#' with an elastic net penalty and cross validation.
+#' This function is adapted from the \emph{sparsevar} package
+#' (<https://github.com/svazzole/sparsevar/tree/master>), which is distributed under
+#' the GNU General Public License v2. The code has been modified to specifically implement
+#' the elastic net penalty (penalty = "ENET") and cross validation (method = "cv").
+#'
+#' @param data A numeric matrix or data frame with time series data (observations in rows,
+#'   variables in columns).
+#' @param p Integer. The order of the VAR model.
+#' @param ... Additional options for estimation. Global options include:
+#'   \itemize{
+#'     \item \code{threshold}: Logical. If \code{TRUE}, all entries smaller than the oracle
+#'           threshold are set to zero.
+#'     \item \code{scale}: Logical. Whether to scale the data (default is \code{FALSE}).
+#'     \item \code{nfolds}: Integer. The number of folds used for cross validation (default is 10).
+#'     \item \code{parallel}: Logical. If \code{TRUE}, use multicore backend (default is \code{FALSE}).
+#'     \item \code{ncores}: Integer. If \code{parallel = TRUE}, specify the number of cores to use.
+#'     \item \code{alpha}: Numeric. The elastic net mixing parameter (default is 1, i.e. LASSO).
+#'     \item \code{type.measure}: Character. The error measure for CV (e.g., \code{"mse"} or \code{"mae"}).
+#'     \item \code{nlambda}: Integer. The number of lambda values to use in cross validation (default is 100).
+#'     \item \code{leaveOut}: Integer. In time slice validation, leave out the last observations (default is 15).
+#'     \item \code{horizon}: Integer. The forecast horizon to use for estimating error (default is 1).
+#'     \item \code{lambda}: Either a numeric vector of lambda values or a string indicating which
+#'           lambda to use (default is \code{"lambda.min"}).
+#'     \item \code{return_fit}: Logical. If \code{TRUE}, return the complete fit object.
+#'   }
+#'
+#' @return A list with the following components:
+#'   \item{mu}{A vector of means for each variable.}
+#'   \item{A}{A list (of length \code{p}) of the estimated coefficient matrices for the VAR process.}
+#'   \item{fit}{(Optional) The complete results of the penalized least squares estimation.}
+#'   \item{lambda}{The chosen lambda value (by cross validation).}
+#'   \item{mse}{The minimum mean squared error from cross validation.}
+#'   \item{mse_sd}{The standard deviation of the mean squared error.}
+#'   \item{time}{Elapsed time for the estimation.}
+#'   \item{series}{The (possibly transformed) input time series.}
+#'   \item{residuals}{The residuals of the VAR model.}
+#'   \item{sigma}{The estimated variance/covariance matrix of the residuals.}
+#'
+#' @references The original source code is adapted from the
+#'   \href{https://github.com/svazzole/sparsevar/tree/master}{sparsevar package},
+#'   which is distributed under the GNU General Public License v2.
+#'
+#' @export
+fitVAR <- function(data, p = 1, ...) {
+  opt <- list(...)
+
+  # convert data to matrix if necessary
+  if (!is.matrix(data)) {
+    data <- as.matrix(data)
+  }
+
+  cnames <- colnames(data)
+
+  # Use cross validation to find lambda and fit the model
+  out <- cvVAR(data, p, opt)
+
+  # Add variable names to the estimated matrices if available
+  if (!is.null(cnames)) {
+    for (k in 1:length(out$A)) {
+      colnames(out$A[[k]]) <- cnames
+      rownames(out$A[[k]]) <- cnames
+    }
+  }
+
+  return(out)
+}
+
+
+#' Cross-Validated VAR Estimation using Elastic Net
+#'
+#' This internal function performs cross validation for VAR estimation using the elastic net
+#' penalty. It prepares the data, calls the elastic net CV routine, reshapes the estimated coefficients,
+#' applies optional thresholding, computes residuals, and estimates the error covariance.
+#'
+#' @param data A numeric matrix with time series data (observations in rows, variables in columns).
+#' @param p Integer. The order of the VAR model.
+#' @param opt List. A list of options (see \code{fitVAR} for details).
+#'
+#' @return A list with components:
+#'   \item{mu}{Vector of means of the original series.}
+#'   \item{A}{List of VAR coefficient matrices (one for each lag).}
+#'   \item{fit}{The complete elastic net CV fit (if requested).}
+#'   \item{lambda}{The optimal lambda value chosen by CV.}
+#'   \item{mse}{The minimum mean squared error from CV.}
+#'   \item{mse_sd}{Standard deviation of the MSE.}
+#'   \item{time}{Elapsed time for the ENET estimation.}
+#'   \item{series}{The transformed series (after centering/scaling).}
+#'   \item{residuals}{Residuals from the VAR model.}
+#'   \item{sigma}{Estimated covariance matrix of the residuals.}
+#'
+#' @keywords internal
+cvVAR <- function(data, p, opt = NULL) {
+  nc <- ncol(data)
+  nr <- nrow(data)
+
+  threshold <- ifelse(!is.null(opt$threshold), opt$threshold, FALSE)
+  threshold_type <- ifelse(!is.null(opt$threshold_type), opt$threshold_type, "soft")
+  return_fit <- ifelse(!is.null(opt$return_fit), opt$return_fit, FALSE)
+
+  # Transform the dataset into design matrices for VAR estimation
+  tr_dt <- transformData(data, p, opt)
+
+  # Fit the elastic net model via cross validation
+  t <- Sys.time()
+  fit <- cvVAR_ENET(tr_dt$X, tr_dt$y, nvar = nc, opt)
+  elapsed <- Sys.time() - t
+
+  # Extract the lambda option
+  lambda <- ifelse(is.null(opt$lambda), "lambda.min", opt$lambda)
+
+  # Extract coefficients (ignoring the intercept) and reshape into a matrix
+  Avector <- stats::coef(fit, s = lambda)
+  A <- matrix(Avector[2:length(Avector)],
+              nrow = nc, ncol = nc * p,
+              byrow = TRUE)
+
+  mse <- min(fit$cvm)
+
+  # Apply thresholding if requested
+  if (threshold == TRUE) {
+    A <- applyThreshold(A, nr, nc, p, type = threshold_type)
+  }
+
+  # Split the coefficient matrix into a list (one matrix per lag)
+  A <- splitMatrix(A, p)
+
+  # Compute residuals from the VAR model
+  res <- computeResiduals(tr_dt$series, A)
+
+  # Extract the standard deviation of the CV error
+  ix <- which(fit$cvm == min(fit$cvm))
+  mse_sd <- fit$cvsd[ix]
+
+  # Create and return the output list
+  output <- list()
+  output$mu <- tr_dt$mu
+  output$A <- A
+
+  if (return_fit == TRUE) {
+    output$fit <- fit
+  }
+
+  output$lambda <- fit$lambda.min
+  output$mse <- mse
+  output$mse_sd <- mse_sd
+  output$time <- elapsed
+  output$series <- tr_dt$series
+  output$residuals <- res
+
+  # Estimate the error covariance matrix
+  output$sigma <- estimateCovariance(res)
+
+  attr(output, "class") <- "var"
+  attr(output, "type") <- "fit"
+  return(output)
+}
+
+
+#' Cross Validation for Elastic Net VAR Estimation
+#'
+#' This internal function performs cross validation using elastic net (ENET)
+#' estimation via the \code{glmnet} package. It supports parallel processing if requested.
+#'
+#' @param X A numeric matrix of predictors.
+#' @param y Numeric vector of responses.
+#' @param nvar Integer. The number of variables in the original VAR (number of columns in data).
+#' @param opt List. A list of options including:
+#'   \itemize{
+#'     \item \code{alpha}: The elastic net mixing parameter (default = 1).
+#'     \item \code{nlambda}: Number of lambda values (default = 100).
+#'     \item \code{type.measure}: Error measure for CV (default = "mse").
+#'     \item \code{nfolds}: Number of folds for CV (default = 10).
+#'     \item \code{parallel}: Logical. Whether to use parallel processing (default = FALSE).
+#'     \item \code{ncores}: Number of cores for parallel processing (default = 1).
+#'     \item \code{lambdas_list}: Optionally, a user-specified list of lambdas.
+#'     \item \code{folds_ids}: Optionally, user-specified fold IDs for CV.
+#'   }
+#'
+#' @return An object of class \code{cv.glmnet} as returned by \code{glmnet::cv.glmnet}.
+#'
+#' @keywords internal
+cvVAR_ENET <- function(X, y, nvar, opt) {
+  a <- ifelse(is.null(opt$alpha), 1, opt$alpha)
+  nl <- ifelse(is.null(opt$nlambda), 100, opt$nlambda)
+  tm <- ifelse(is.null(opt$type.measure), "mse", opt$type.measure)
+  nf <- ifelse(is.null(opt$nfolds), 10, opt$nfolds)
+  parall <- ifelse(is.null(opt$parallel), FALSE, opt$parallel)
+  ncores <- ifelse(is.null(opt$ncores), 1, opt$ncores)
+
+  # Define lambda values to use
+  if (!is.null(opt$lambdas_list)) {
+    lambdas_list <- opt$lambdas_list
+  } else {
+    lambdas_list <- c(0)
+  }
+
+  # Assign fold IDs if provided
+  if (is.null(opt$folds_ids)) {
+    folds_ids <- numeric(0)
+  } else {
+    nr <- nrow(X)
+    folds_ids <- rep(sort(rep(seq(nf), length.out = nr / nvar)), nvar)
+  }
+
+  # Call cv.glmnet with or without parallel processing
+  if (parall == TRUE) {
+    if (ncores < 1) {
+      stop("The number of cores must be > 1")
+    } else {
+      cl <- doParallel::registerDoParallel(cores = ncores)
+      if (length(folds_ids) == 0) {
+        if (length(lambdas_list) < 2) {
+          cvfit <- glmnet::cv.glmnet(X, y,
+                                     alpha = a, nlambda = nl,
+                                     type.measure = tm, nfolds = nf,
+                                     parallel = TRUE, standardize = FALSE)
+        } else {
+          cvfit <- glmnet::cv.glmnet(X, y,
+                                     alpha = a, lambda = lambdas_list,
+                                     type.measure = tm, nfolds = nf,
+                                     parallel = TRUE, standardize = FALSE)
+        }
+      } else {
+        if (length(lambdas_list) < 2) {
+          cvfit <- glmnet::cv.glmnet(X, y,
+                                     alpha = a, nlambda = nl,
+                                     type.measure = tm, foldid = folds_ids,
+                                     parallel = TRUE, standardize = FALSE)
+        } else {
+          cvfit <- glmnet::cv.glmnet(X, y,
+                                     alpha = a, lambda = lambdas_list,
+                                     type.measure = tm, foldid = folds_ids,
+                                     parallel = TRUE, standardize = FALSE)
+        }
+      }
+    }
+  } else {
+    if (length(folds_ids) == 0) {
+      if (length(lambdas_list) < 2) {
+        cvfit <- glmnet::cv.glmnet(X, y,
+                                   alpha = a, nlambda = nl,
+                                   type.measure = tm, nfolds = nf,
+                                   parallel = FALSE, standardize = FALSE)
+      } else {
+        cvfit <- glmnet::cv.glmnet(X, y,
+                                   alpha = a, lambda = lambdas_list,
+                                   type.measure = tm, nfolds = nf,
+                                   parallel = FALSE, standardize = FALSE)
+      }
+    } else {
+      if (length(lambdas_list) < 2) {
+        cvfit <- glmnet::cv.glmnet(X, y,
+                                   alpha = a, nlambda = nl,
+                                   type.measure = tm, foldid = folds_ids,
+                                   parallel = FALSE, standardize = FALSE)
+      } else {
+        cvfit <- glmnet::cv.glmnet(X, y,
+                                   alpha = a, lambda = lambdas_list,
+                                   type.measure = tm, foldid = folds_ids,
+                                   parallel = FALSE, standardize = FALSE)
+      }
+    }
+  }
+
+  return(cvfit)
+}
+
+
+#' Transform Data for VAR Estimation
+#'
+#' Transforms the input time series data into the design matrices required for VAR estimation.
+#' This includes centering, optional scaling, and constructing the lagged predictor matrix.
+#'
+#' @param data A numeric matrix or data frame with time series data (observations in rows,
+#'   variables in columns).
+#' @param p Integer. The order of the VAR model (number of lags).
+#' @param opt List. Options for data transformation. Supported options include:
+#'   \itemize{
+#'     \item \code{scale}: Logical. Whether to scale the data columns (default is \code{FALSE}).
+#'     \item \code{center}: Logical. Whether to center the data columns (default is \code{TRUE}).
+#'   }
+#'
+#' @return A list with the following components:
+#'   \item{X}{The design matrix (via the Kronecker product) for lagged predictors.}
+#'   \item{y}{A vectorized response corresponding to the lagged data.}
+#'   \item{series}{The (centered and possibly scaled) original time series matrix.}
+#'   \item{mu}{A row vector of the column means used for centering.}
+#'
+#' @keywords internal
+transformData <- function(data, p, opt) {
+  nr <- nrow(data)
+  nc <- ncol(data)
+  data <- as.matrix(data)
+
+  # Determine whether to scale and/or center the data
+  scale_flag <- ifelse(is.null(opt$scale), FALSE, opt$scale)
+  center_flag <- ifelse(is.null(opt$center), TRUE, opt$center)
+
+  if (center_flag == TRUE) {
+    m <- colMeans(data)
+    cm <- matrix(rep(m, nrow(data)), nrow = nrow(data), byrow = TRUE)
+    data <- data - cm
+  } else {
+    m <- rep(0, nc)
+  }
+
+  if (scale_flag == TRUE) {
+    data <- apply(X = data, MARGIN = 2, FUN = scale)
+  }
+
+  # Construct lagged matrices
+  tmpX <- data[1:(nr - 1), ]
+  tmpY <- data[2:nr, ]
+  tmpX <- duplicateMatrix(tmpX, p)
+  tmpY <- tmpY[p:nrow(tmpY), ]
+  y <- as.vector(tmpY)
+
+  # Create the design matrix using the Kronecker product
+  I <- Matrix::Diagonal(nc)
+  X <- kronecker(I, tmpX)
+
+  output <- list()
+  output$X <- X
+  output$y <- y
+  output$series <- data
+  output$mu <- t(m)
+  return(output)
+}
+
+
+#' Apply Thresholding to VAR Coefficients
+#'
+#' Applies a thresholding rule to a coefficient matrix by setting entries below a
+#' certain threshold to zero. Two types of thresholding are available: "soft" and "hard".
+#'
+#' @param a_mat Numeric matrix. The coefficient matrix to be thresholded.
+#' @param nr Integer. The number of rows in the original data.
+#' @param nc Integer. The number of variables (columns) in the original data.
+#' @param p Integer. The order of the VAR model.
+#' @param type Character. The type of threshold to apply; either \code{"soft"} (default)
+#'   or \code{"hard"}.
+#'
+#' @return The thresholded coefficient matrix.
+#'
+#' @keywords internal
+applyThreshold <- function(a_mat, nr, nc, p, type = "soft") {
+  if (type == "soft") {
+    tr <- 1 / sqrt(p * nc * log(nr))
+  } else if (type == "hard") {
+    tr <- (nc) ^ (-0.49)
+  } else {
+    stop("Unknown threshold type. Possible values are: \"soft\" or \"hard\"")
+  }
+  l_mat <- abs(a_mat) >= tr
+  a_mat <- a_mat * l_mat
+  return(a_mat)
+}
+
+
+#' Compute VAR Model Residuals
+#'
+#' Computes the residuals from a VAR model by subtracting the fitted values (obtained
+#' from the estimated coefficient matrices) from the original time series data.
+#'
+#' @param data A numeric matrix of the original time series (observations in rows).
+#' @param A List. A list of VAR coefficient matrices (one for each lag).
+#'
+#' @return A numeric matrix of residuals.
+#'
+#' @keywords internal
+computeResiduals <- function(data, A) {
+  nr <- nrow(data)
+  nc <- ncol(data)
+  p <- length(A)
+  res <- matrix(0, nrow = nr, ncol = nc)
+  f <- matrix(0, nrow = nr, ncol = nc)
+
+  for (i in 1:p) {
+    tmpD <- rbind(matrix(0, nrow = i, ncol = nc), data[1:(nrow(data) - i), ])
+    tmpF <- t(A[[i]] %*% t(tmpD))
+    f <- f + tmpF
+  }
+  res <- data - f
+  return(res)
+}
+
+
+#' Estimate Covariance Matrix from Residuals
+#'
+#' Estimates the covariance (or variance) matrix of the residuals using shrinkage estimation.
+#' This function utilizes \code{corpcor::cov.shrink} for covariance estimation.
+#'
+#' @param res A numeric matrix of residuals from the VAR model.
+#' @param ... Additional arguments passed to \code{corpcor::cov.shrink} (if any).
+#'
+#' @return A numeric covariance matrix.
+#'
+#' @importFrom corpcor cov.shrink
+#' @keywords internal
+estimateCovariance <- function(res, ...) {
+  nc <- ncol(res)
+  s <- corpcor::cov.shrink(res, verbose = FALSE)
+  sigma <- matrix(0, nrow = nc, ncol = nc)
+  for (i in 1:nc) {
+    for (j in 1:nc) {
+      sigma[i, j] <- s[i, j]
+    }
+  }
+  return(sigma)
+}
+
+
+#' Construct Lagged Design Matrix for VAR
+#'
+#' Duplicates the original data matrix to create a lagged predictor matrix for VAR estimation.
+#'
+#' @param data A numeric matrix with time series data (observations in rows).
+#' @param p Integer. The order of the VAR model (number of lags).
+#'
+#' @return A numeric matrix with duplicated columns corresponding to lagged observations.
+#'
+#' @keywords internal
+duplicateMatrix <- function(data, p) {
+  nr <- nrow(data)
+  nc <- ncol(data)
+  outputData <- data
+  if (p > 1) {
+    for (i in 1:(p - 1)) {
+      tmpData <- matrix(0, nrow = nr, ncol = nc)
+      tmpData[(i + 1):nr, ] <- data[1:(nr - i), ]
+      outputData <- cbind(outputData, tmpData)
+    }
+  }
+  outputData <- outputData[p:nr, ]
+  return(outputData)
+}
+
+
+#' Split Coefficient Matrix into VAR Lags
+#'
+#' Splits a matrix of estimated coefficients into a list of matrices,
+#' each corresponding to one lag of the VAR model.
+#'
+#' @param M A numeric matrix of coefficients.
+#' @param p Integer. The order of the VAR model (number of lags).
+#'
+#' @return A list of \code{p} matrices, each of dimension (number of variables) x (number of variables).
+#'
+#' @keywords internal
+splitMatrix <- function(M, p) {
+  nr <- nrow(M)
+  A <- list()
+  for (i in 1:p) {
+    ix <- ((i - 1) * nr) + (1:nr)
+    A[[i]] <- M[ , ix]
+  }
+  return(A)
+}
+

@@ -38,7 +38,7 @@ The dataset is provided as an \code{.RData} file containing:
 # below calculates the average return volatility for all stocks, applies
 # the change point detection algorithm, and plots the results with detected
 # change points shown as vertical red and black lines.
-\dontrun{
+\donttest{
 # Load the dataset
 data(sp500)
 
